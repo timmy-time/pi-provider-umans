@@ -56,7 +56,7 @@ type UmansModelInfo = {
   capabilities: ModelCapabilities;
 };
 
-const DEFAULT_BASE_URL = "https://api.code.umans.ai";
+const DEFAULT_BASE_URL = "http://localhost:8800"; // use hraedon/sluice
 const API_KEY_ENV = "UMANS_API_KEY";
 const USER_AGENT = "pi-umans-provider/1.2.5";
 const STATUS_UPDATE_INTERVAL_MS = 1000;
