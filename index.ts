@@ -197,6 +197,22 @@ const STATIC_CATALOG: Record<string, UmansModelInfo> = {
       },
     },
   },
+  "umans-deepseek-v4-pro-dspark": {
+    name: "umans-deepseek-v4-pro-dspark",
+    display_name: "Umans Deepseek v4 Pro",
+    capabilities: {
+      max_completion_tokens: 131072,
+      recommended_max_tokens: 131071,
+      context_window: 393216,
+      supports_vision: false,
+      supports_tools: true,
+      reasoning: {
+        supported: true,
+        can_disable: true,
+        levels: ["none","high","max"],
+        default_level: "high"
+    },
+  }
 };
 
 /**
