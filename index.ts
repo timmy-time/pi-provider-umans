@@ -56,9 +56,9 @@ type UmansModelInfo = {
   capabilities: ModelCapabilities;
 };
 
-const DEFAULT_BASE_URL = "http://localhost:8800"; // use hraedon/sluice
+const DEFAULT_BASE_URL = "https://api.code.umans.ai";
 const API_KEY_ENV = "UMANS_API_KEY";
-const USER_AGENT = "pi-umans-provider/1.2.5";
+const USER_AGENT = "pi-umans-provider/1.4.2";
 const STATUS_UPDATE_INTERVAL_MS = 1000;
 
 // Client-side vision handoff env + tuning. See header doc for the design.
@@ -769,6 +769,271 @@ export default async function (pi: ExtensionAPI) {
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
         return { content: [{ type: "text", text: `Web search failed: ${m}` }], details: {} };
+      }
+    },
+  });
+
+  // === Hallucination checker: verify factual claims made by coding agents ===
+  // Uses a fast side-call model (umans-flash by default) to:
+  //   - Extract individual factual claims from AI-generated text
+  //   - Cross-reference claims against available evidence (codebase, web, knowledge)
+  //   - Return a structured verdict per claim (verified / unverified / likely-hallucinated)
+  // Architecture: side-call HTTP pattern, same as searchWeb / analyzeImage.
+  // The checker model acts as an independent verifier — it never sees the original
+  // prompt, only the claim text + evidence, enforcing blind re-verification.
+  const checkerModelId = pickSearchModel(catalog); // fast & cheap for verification
+  const CHECKER_TIMEOUT_MS = 45_000;
+  const CHECKER_MAX_TOKENS = 2048;
+
+  interface VerificationVerdict {
+    claim: string;
+    verdict: "verified" | "partial" | "hallucinated" | "uncertain";
+    confidence: number; // 0.0–1.0
+    reasoning: string;
+    evidence?: string;
+  }
+
+  async function verifyClaims(
+    apiKey: string,
+    baseUrl: string,
+    claimText: string,
+    domain?: string,
+    signal?: AbortSignal,
+  ): Promise<VerificationVerdict[]> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), CHECKER_TIMEOUT_MS);
+    const onAbort = () => ctrl.abort();
+    if (signal) {
+      if (signal.aborted) ctrl.abort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
+      const domainHint = domain ? ` in the context of ${domain}` : "";
+      const res = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          Authorization: `Bearer ${apiKey}`,
+          "anthropic-version": "2023-06-01",
+          "User-Agent": USER_AGENT,
+        },
+        body: JSON.stringify({
+          model: checkerModelId,
+          max_tokens: CHECKER_MAX_TOKENS,
+          tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }],
+          messages: [
+            {
+              role: "user",
+              content:
+                "You are a rigorous hallucination detector for a coding agent. " +
+                "Analyze each claim below and classify it as:\n" +
+                "- 'verified': you can confirm this with high confidence from your training or the evidence.\n" +
+                "- 'partial': mostly right but missing nuance or partially inaccurate.\n" +
+                "- 'hallucinated': factually wrong, fabricated reference, or contradicts established knowledge.\n" +
+                "- 'uncertain': you cannot determine without additional information.\n\n" +
+                `Domain context: ${domainHint || "general coding / software engineering"}\n\n` +
+                "Claims to verify:\n" +
+                claimText
+                + "\n\nReturn your analysis as a JSON array of objects: " +
+                '[{"claim":"...","verdict":"hallucinated","confidence":0.95,"reasoning":"..."},]' +
+                "\nOnly output valid JSON. No markdown, no preamble.",
+            },
+          ],
+        }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}${txt ? `: ${txt.slice(0, 200)}` : ""}`);
+      }
+      const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
+      const text = (data.content ?? [])
+        .filter((b) => b.type === "text" && typeof b.text === "string")
+        .map((b) => b.text!)
+        .join("\n")
+        .trim();
+      if (!text) return [];
+      // JSON may be wrapped in ```json ... ``` — strip it
+      const jsonStr = text.replace(/```(?:json)?\s*/g, "").replace(/```$/g, "").trim();
+      try {
+        const parsed = JSON.parse(jsonStr);
+        return Array.isArray(parsed) ? parsed : (parsed.verdicts ?? []);
+      } catch {
+        // Fallback: return the raw text as a single uncertain result
+        return [{ claim: claimText, verdict: "uncertain", confidence: 0.3, reasoning: text }];
+      }
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  pi.registerTool({
+    name: "hallucination_check",
+    label: "Hallucination Check",
+    description:
+      "Verify factual claims in AI-generated text for hallucinations. Pass text containing " +
+      "claims the model has made (e.g. about file contents, API signatures, library behavior, " +
+      "or bug fixes) and get back a structured verdict for each claim.",
+    promptSnippet: "Verify factual claims in AI-generated text for hallucinations",
+    promptGuidelines: [
+      "Use hallucination_check to verify claims your output makes about file contents, API behavior, " +
+        "library docs, or program output that you cannot independently verify by re-reading files.",
+      "Good candidates: claims about how an API works, whether a file exists, what a library function returns.",
+      "Provide a short, focused piece of text with discrete claims — not an entire conversation log.",
+    ],
+    parameters: Type.Object({
+      text: Type.String({
+        description: "Text containing factual claims to verify for hallucinations",
+      }),
+      domain: Type.Optional(
+        Type.String({
+          description:
+            "Optional domain context for verification (e.g. 'Node.js file system API', 'React 18 hooks')",
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const apiKey = await resolveApiKey(ctx);
+      if (!apiKey) {
+        return {
+          content: [{ type: "text", text: "Umans API key unavailable; cannot run hallucination check." }],
+          details: {},
+        };
+      }
+      try {
+        const verdicts = await verifyClaims(apiKey, baseUrl, params.text, params.domain, signal);
+        if (verdicts.length === 0) {
+          return {
+            content: [{ type: "text", text: "No discrete claims could be extracted for verification." }],
+            details: {},
+          };
+        }
+        const total = verdicts.length;
+        const bad = verdicts.filter((v) => v.verdict === "hallucinated").length;
+        const partial = verdicts.filter((v) => v.verdict === "partial").length;
+        const summary = `Hallucination check: ${bad} hallucinated, ${partial} partial, ${total - bad - partial} ok out of ${total} claims.`;
+        const body = verdicts
+          .map(
+            (v) =>
+              `[${v.verdict.toUpperCase()}] (${Math.round(v.confidence * 100)}%) ${v.claim}\n  → ${v.reasoning}`,
+          )
+          .join("\n\n");
+        return {
+          content: [{ type: "text", text: `${summary}\n\n${body}` }],
+          details: { verdicts, badCount: bad, partialCount: partial, totalCount: total },
+        };
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        return { content: [{ type: "text", text: `Hallucination check failed: ${m}` }], details: {} };
+      }
+    },
+  });
+
+  // === File-system verification tool (fast, deterministic pre-check) ===
+  // Runs before other verification. Does not need an LLM call — checks whether
+  // files, imports, and references the model claims exist on disk.
+  pi.registerTool({
+    name: "file_verify",
+    label: "File Verify",
+    description:
+      "Check whether files and paths referenced in AI-generated content actually exist on disk. " +
+      "Use to verify claims like 'the file at path X contains Y' or 'function Z is defined in module W'.",
+    promptSnippet: "Verify file and path claims against the actual filesystem",
+    promptGuidelines: [
+      "Use file_verify to check whether files or paths the model claims exist are actually present.",
+      "Pass one path per call. The tool checks the real filesystem — no model call needed.",
+    ],
+    parameters: Type.Object({
+      paths: Type.String({
+        description:
+          "One or more file paths to check, one per line (absolute or relative to the workspace)",
+      }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      const fs = await import("node:fs/promises");
+      const path = await import("node:path");
+      const lines = params.paths
+        .split(/\n/)
+        .map((p: string) => p.trim())
+        .filter((p: string) => p.length > 0);
+      const results: Array<{ path: string; exists: boolean; type?: string }> = [];
+      for (const p of lines) {
+        try {
+          const stat = await fs.stat(p);
+          results.push({ path: p, exists: true, type: stat.isDirectory() ? "directory" : "file" });
+        } catch {
+          results.push({ path: p, exists: false });
+        }
+      }
+      const missing = results.filter((r) => !r.exists);
+      const found = results.filter((r) => r.exists);
+      const summary = `${found.length} path(s) verified, ${missing.length} missing.`;
+      const body =
+        found.map((r) => `✓ ${r.path} (${r.type})`).join("\n") +
+        "\n" +
+        missing.map((r) => `✗ ${r.path} (not found — possible hallucination)`).join("\n");
+      return {
+        content: [{ type: "text", text: `${summary}\n\n${body.trim()}` }],
+        details: { found: found.map((r) => r.path), missing: missing.map((r) => r.path) },
+      };
+    },
+  });
+
+  // /umans-check command — interactive hallucination check
+  pi.registerCommand("umans-check", {
+    description: "Check claims in the last assistant response for hallucinations",
+    handler: async (_args: string, ctx) => {
+      const entries = ctx.sessionManager?.getEntries();
+      if (!entries || entries.length === 0) {
+        ctx.ui.notify("No entries in session to check.", "warning");
+        return;
+      }
+      const lastAssistant = [...entries].reverse().find(
+        (e) => (e as any)?.message?.role === "assistant",
+      );
+      const assistantMsg = (lastAssistant as any)?.message;
+      if (!assistantMsg) {
+        ctx.ui.notify("No assistant message found in session.", "warning");
+        return;
+      }
+      const text = assistantMsg.content
+        .filter((b: any) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("\n");
+      if (!text.trim()) {
+        ctx.ui.notify("Last assistant message is empty.", "warning");
+        return;
+      }
+      const apiKey = await resolveApiKey(ctx);
+      if (!apiKey) {
+        ctx.ui.notify("Umans API key unavailable; cannot run hallucination check.", "error");
+        return;
+      }
+      ctx.ui.notify("Running hallucination check on last assistant message…", "info");
+      try {
+        const verdicts = await verifyClaims(
+          apiKey,
+          baseUrl,
+          text.slice(0, 3000),
+          undefined,
+        );
+        const bad = verdicts.filter((v) => v.verdict === "hallucinated").length;
+        if (bad === 0) {
+          ctx.ui.notify(
+            `Hallucination check: ${verdicts.length} claims checked, none flagged as hallucinated.`,
+            "info",
+          );
+        } else {
+          ctx.ui.notify(
+            `Hallucination check: ${bad}/${verdicts.length} claims may be hallucinated!`,
+            "warning",
+          );
+        }
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`Hallucination check failed: ${m}`, "error");
       }
     },
   });

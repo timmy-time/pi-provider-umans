@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-umans",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Umans.ai provider for pi — Anthropic Messages-compatible endpoint with dynamic model discovery",
   "type": "module",
   "main": "index.ts",
@@ -32,6 +32,9 @@
     "build": "echo 'nothing to build'",
     "check": "tsc --noEmit"
   },
+  "dependencies": {
+    "pi-subagents": "^0.34.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -39,7 +42,8 @@
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.79.7",
-    "@earendil-works/pi-coding-agent": "^0.79.7"
+    "@earendil-works/pi-coding-agent": "^0.79.7",
+    "typescript": "^7.0.2"
   },
   "pi": {
     "extensions": [

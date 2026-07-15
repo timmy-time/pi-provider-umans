@@ -36,6 +36,12 @@ Paste your API key when prompted. It's stored securely in `~/.pi/agent/auth.json
 export UMANS_API_KEY="sk-your-key-here"
 ```
 
+## Disable
+
+```bash
+export UMANS_DISABLE="1"   # skip loading the extension entirely
+```
+
 ## Anthropic Messages endpoint
 
 This provider talks to Umans through its **Anthropic-compatible `/v1/messages` endpoint** and registers with pi as `api: "anthropic-messages"`. Requests use the standard Anthropic wire format — the `anthropic-version: 2023-06-01` header, message-block content, and Anthropic adaptive thinking (`thinking.type: "adaptive"`, surfaced as effort levels) — rather than the OpenAI Chat Completions format the extension used previously. That makes it a drop-in for pi's Anthropic provider stack.
@@ -56,6 +62,7 @@ Current catalog:
 | `umans-coder` | Umans Coder | native | ✅ (always on) | 256K |
 | `umans-flash` | Umans Flash | native | ✅ | 256K |
 | `umans-qwen3.6-35b-a3b` | Umans Qwen3.6 35B A3B | native | ✅ | 256K |
+| `umans-deepseek-v4-pro-dspark` | Umans Deepseek v4 Pro | — | ✅ (high default) | 393K |
 
 New models added by Umans appear automatically — no extension update needed.
 
