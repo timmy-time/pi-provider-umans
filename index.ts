@@ -211,8 +211,9 @@ const STATIC_CATALOG: Record<string, UmansModelInfo> = {
         can_disable: true,
         levels: ["none","high","max"],
         default_level: "high"
+      },
     },
-  }
+  },
 };
 
 /**
