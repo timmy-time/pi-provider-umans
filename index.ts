@@ -56,7 +56,7 @@ type UmansModelInfo = {
   capabilities: ModelCapabilities;
 };
 
-const DEFAULT_BASE_URL = "https://api.code.umans.ai";
+const DEFAULT_BASE_URL = "http://localhost:8800";
 const API_KEY_ENV = "UMANS_API_KEY";
 const USER_AGENT = "pi-umans-provider/1.4.2";
 const STATUS_UPDATE_INTERVAL_MS = 1000;
@@ -109,6 +109,23 @@ const STATIC_CATALOG: Record<string, UmansModelInfo> = {
         can_disable: false,
         levels: ["minimal", "low", "medium", "high", "xhigh", "max"],
         default_level: "medium",
+      },
+    },
+  },
+  "umans-kimi-k3": {
+    name: "umans-kimi-k3",
+    display_name: "Umans Kimi K3 (prerelease)",
+    capabilities: {
+      max_completion_tokens: 131072,
+      recommended_max_tokens: 131071,
+      context_window: 1048576,
+      supports_vision: true,
+      supports_tools: true,
+      reasoning: {
+        supported: true,
+        can_disable: true,
+        levels: ["none", "low", "high", "max"],
+        default_level: "max",
       },
     },
   },
@@ -209,8 +226,8 @@ const STATIC_CATALOG: Record<string, UmansModelInfo> = {
       reasoning: {
         supported: true,
         can_disable: true,
-        levels: ["none","high","max"],
-        default_level: "high"
+        levels: ["none", "high", "max"],
+        default_level: "high",
       },
     },
   },
